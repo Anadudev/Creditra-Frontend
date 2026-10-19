@@ -14,6 +14,13 @@ import type {
   NotificationType,
   Toast,
 } from '../types/notification';
+import {
+  parseInbox,
+  parsePreferences,
+  serializeInbox,
+  serializePreferences,
+} from './notificationStorage';
+import { writeJson } from '../utils/storage';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -97,33 +104,60 @@ export const NotificationContext = createContext<NotificationContextValue | null
 export function NotificationProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [banners, setBanners] = useState<BannerAlert[]>([]);
-  const [notifications, setNotifications] = useState<Notification[]>(() => {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      return stored ? JSON.parse(stored) : [];
-    } catch {
-      return [];
+  
+  // Parse notifications and detect if rewrite is needed
+  const notificationsInit = useRef<{ parsed: Notification[]; needsRewrite: boolean }>({ parsed: [], needsRewrite: false });
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored) {
+      const raw = JSON.parse(stored);
+      const parsed = parseInbox(raw);
+      const serialized = serializeInbox(parsed);
+      notificationsInit.current = { parsed, needsRewrite: stored !== serialized };
     }
-  });
-  const [preferences, setPreferences] = useState<NotificationPreferences>(() => {
-    try {
-      const stored = localStorage.getItem(PREFS_KEY);
-      return stored ? { ...DEFAULT_PREFS, ...JSON.parse(stored) } : DEFAULT_PREFS;
-    } catch {
-      return DEFAULT_PREFS;
+  } catch {
+    notificationsInit.current = { parsed: [], needsRewrite: false };
+  }
+  const [notifications, setNotifications] = useState<Notification[]>(notificationsInit.current.parsed);
+
+  // Parse preferences and detect if rewrite is needed
+  const preferencesInit = useRef<{ parsed: NotificationPreferences; needsRewrite: boolean }>({ parsed: DEFAULT_PREFS, needsRewrite: false });
+  try {
+    const stored = localStorage.getItem(PREFS_KEY);
+    if (stored) {
+      const raw = JSON.parse(stored);
+      const parsed = parsePreferences(raw);
+      const serialized = serializePreferences(parsed);
+      preferencesInit.current = { parsed, needsRewrite: stored !== serialized };
     }
-  });
+  } catch {
+    preferencesInit.current = { parsed: DEFAULT_PREFS, needsRewrite: false };
+  }
+  const [preferences, setPreferences] = useState<NotificationPreferences>(preferencesInit.current.parsed);
+
   const [isPanelOpen, setIsPanelOpen] = useState(false);
   const timersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const hasHydratedRef = useRef(false);
 
-  // Persist notifications
+  // Rewrite storage on mount if data was cleaned/migrated (synchronous during render)
+  if (!hasHydratedRef.current) {
+    hasHydratedRef.current = true;
+    if (notificationsInit.current.needsRewrite) {
+      writeJson(STORAGE_KEY, serializeInbox(notifications));
+    }
+    if (preferencesInit.current.needsRewrite) {
+      writeJson(PREFS_KEY, serializePreferences(preferences));
+    }
+  }
+
+  // Persist notifications on changes
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(notifications.slice(0, 100)));
+    writeJson(STORAGE_KEY, serializeInbox(notifications));
   }, [notifications]);
 
-  // Persist preferences
+  // Persist preferences on changes
   useEffect(() => {
-    localStorage.setItem(PREFS_KEY, JSON.stringify(preferences));
+    writeJson(PREFS_KEY, serializePreferences(preferences));
   }, [preferences]);
 
   const genId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
