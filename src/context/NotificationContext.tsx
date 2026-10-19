@@ -13,6 +13,8 @@ import type {
   NotificationPreferences,
   NotificationType,
   Toast,
+  NotificationAction,
+  NotificationActionDescriptor,
 } from '../types/notification';
 import {
   parseInbox,
@@ -22,7 +24,7 @@ import {
 } from './notificationStorage';
 import { writeJson } from '../utils/storage';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────
 
 interface AddToastOptions {
   type: NotificationType;
@@ -31,7 +33,10 @@ interface AddToastOptions {
   message: string;
   duration?: number;
   persistent?: boolean;
-  action?: { label: string; onClick: () => void };
+  /** Action for transient toasts (non‑persisted) */
+  action?: NotificationAction;
+  /** Action descriptor for persisted notifications */
+  actionDescriptor?: NotificationActionDescriptor;
   /** If true, also saves to notification history */
   saveToHistory?: boolean;
 }
@@ -104,7 +109,24 @@ export const NotificationContext = createContext<NotificationContextValue | null
 export function NotificationProvider({ children }: { children: React.ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [banners, setBanners] = useState<BannerAlert[]>([]);
-  
+
+  // Validate deserialized action descriptors.
+  const validateAction = (action: any): NotificationActionDescriptor | undefined => {
+    if (!action || typeof action !== 'object' || typeof action.label !== 'string') return undefined;
+    if (action.kind === 'route') {
+      if (typeof action.to !== 'string') return undefined;
+      if (!action.to.startsWith('/') || action.to.includes('://')) return undefined;
+      return { label: action.label, kind: 'route', to: action.to } as NotificationActionDescriptor;
+    }
+    if (action.kind === 'command') {
+      const valid = ['open-wallet', 'open-kyc', 'retry-sync'];
+      if (valid.includes(action.id)) {
+        return { label: action.label, kind: 'command', id: action.id } as NotificationActionDescriptor;
+      }
+    }
+    return undefined;
+  };
+
   // Parse notifications and detect if rewrite is needed
   const notificationsInit = useRef<{ parsed: Notification[]; needsRewrite: boolean }>({ parsed: [], needsRewrite: false });
   try {
@@ -112,8 +134,13 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
     if (stored) {
       const raw = JSON.parse(stored);
       const parsed = parseInbox(raw);
-      const serialized = serializeInbox(parsed);
-      notificationsInit.current = { parsed, needsRewrite: stored !== serialized };
+      // Apply action validation to parsed notifications
+      const validated = parsed.map(n => ({
+        ...n,
+        action: n.action ? validateAction(n.action) : undefined,
+      }));
+      const serialized = serializeInbox(validated);
+      notificationsInit.current = { parsed: validated, needsRewrite: stored !== serialized };
     }
   } catch {
     notificationsInit.current = { parsed: [], needsRewrite: false };
@@ -206,7 +233,8 @@ export function NotificationProvider({ children }: { children: React.ReactNode }
         message: opts.message,
         timestamp: new Date().toISOString(),
         read: false,
-        action: opts.action,
+        // Persist descriptor only
+        action: opts.actionDescriptor,
       };
       setNotifications(prev => [notification, ...prev].slice(0, 100));
     }
